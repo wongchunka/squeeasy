@@ -189,7 +189,7 @@ def execute_agent(
             )
             content = response.choices[0].message.content
 
-            if model == "deepseek-reasoner" and var_show_reasoning:
+            if model == "deepseek/deepseek-reasoner" and var_show_reasoning:
                 print(response.choices[0].message.reasoning_content)
 
             json_str = robust_json_extractor(content)
