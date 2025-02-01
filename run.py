@@ -54,7 +54,8 @@ Propose [ 1 ] break through method for the scientific question: {var_scientific_
 {CRITERIA}
 
 **Thinking Process:
-1. Exhaustively review existing approaches and ideas
+0. Use different angles to see and think about the problem
+1. Exhaustively review previously reported approaches and ideas by others
 2. Generate 5 break through ideas
 3. Evaluate conceptual discontinuity from existing ideas
 4. Harshly critique all ideas
@@ -86,8 +87,9 @@ Propose [ 1 ] break through method for the scientific question: {var_scientific_
 {CRITERIA}
 
 **Thinking Process:
+0. Use different angles to see and think about the problem
 1. Review banned ideas aloud
-2. Exhaustively review existing approaches and ideas
+2. Exhaustively review previously reported approaches and ideas by others
 3. Generate 5 break through ideas
 4. Evaluate conceptual discontinuity from existing ideas
 5. Harshly critique all ideas
@@ -190,6 +192,7 @@ def execute_agent(
             content = response.choices[0].message.content
 
             if model == "deepseek/deepseek-reasoner" and var_show_reasoning:
+                print("\nReasoning:")
                 print(response.choices[0].message.reasoning_content)
 
             json_str = robust_json_extractor(content)
@@ -283,7 +286,7 @@ def research_workflow(
     banned_ideas = [c_title] 
     print(f"\nCycle 1: Idea: {c_title}")
     print(f"\nCycle 1: Method: {c_method}")
-    print(f"\nCycle 1: Ideas not selected in this cycle: {banned_ideas}")
+    print(f"\nCycle 1: Combined list of ideas: {banned_ideas}")
 
     for cycle in range(2, cycles+1):
         print(f"\n## Cycle {cycle}: Generating idea ##")
@@ -297,7 +300,7 @@ def research_workflow(
         banned_ideas += [new_title]
         print(f"\nCycle {cycle}: Idea - {new_title}")
         print(f"\nCycle {cycle}: Method: {new_method}")
-        print(f"\nCycle {cycle}: Ideas not selected in this prompt: {banned_ideas}")
+        print(f"\nCycle {cycle}: Combined list of ideas: {banned_ideas}")
 
     # --- PHASE 2: SUBSAMPLED PAIRWISE EVALUATION ---
     print("\n" + "═"*50 + "\n🔍 PHASE 2: SUBSAMPLED PAIRWISE EVALUATION\n" + "═"*50)
