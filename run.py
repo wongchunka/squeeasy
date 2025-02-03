@@ -1,9 +1,10 @@
-# Squeeasy v0.2
+# Squeeasy v0.1.3
 # Developed by Chun-Ka Wong and Wing-Chun San
 # wongeck@hku.hk
-# Last updated: 31/01/2025
+# Last updated: 03/02/2025
 
 import litellm
+from litellm import completion
 import json
 import pandas as pd
 from pydantic import BaseModel, ValidationError, Field
@@ -21,66 +22,41 @@ from openai import OpenAI
 ###############################################################################
 os.environ['DEEPSEEK_API_KEY'] = ""
 os.environ["OPENAI_API_KEY"] = ""
+os.environ['PERPLEXITYAI_API_KEY'] = ""
 
 output_path = ""
+
+var_litearture_review = ""
+
 var_scientific_question = ""
 
-var_llm_agent1 = "o1-mini"
-var_llm_Agent2 = "o1-mini"
-var_llm_Agent3 = "o1-mini"
+var_llm_agent1 = "o3-mini" # For idea GENERATION
+var_llm_agent2 = "o3-mini" # For idea EVALUATION
+var_llm_agent3 = "perplexity/sonar-reasoning" # For literature review
 
-var_cycles = 10
+var_cycles = 5
 var_retries = 3
 var_matches = 1
-var_max_pairs = 20
-var_show_reasoning = False
+var_max_pairs = 5
+var_show_reasoning = True # Only applicable if deepseek/deepseek-reasoner is used
+var_literature_review = False # Only applicable if perplexity/sonar-reasoning is available
 
 CRITERIA = '''
 1. Must be a new approach with no prior publications or report at all.
 2. Out of the box thinking: discontinuity from existing ideas is encouraged.
-3. Detailed experimental design with precision on what material to use.
-4. Feasible, realistic and achievable with current technology.
-5. You have to genuinely believe that it can solve the problem.
+3. Radical ideas are preferred.
+4. Detailed experimental design with precision on what material to use.
+5. Feasible, realistic and achievable with current technology.
+6. You have to genuinely believe that it can solve the problem.
 '''
 
 ###############################################################################
 # Prompts
 ###############################################################################
-
-LLM_AGENT_1_PROMPT = '''
+LLM_agent_1_PROMPT = '''
 Propose [ 1 ] break through method for the scientific question: {var_scientific_question}
 
-**Criteria:
-{CRITERIA}
-
-**Thinking Process:
-0. Use different angles to see and think about the problem
-1. Exhaustively review previously reported approaches and ideas by others
-2. Generate 5 break through ideas
-3. Evaluate conceptual discontinuity from existing ideas
-4. Harshly critique all ideas
-5. Select top 1 idea
-6. Meticulously develop experimental method
-7. Harshly critique method flaws
-8. Refine method to address all critiques
-9. Make draft of JSON output
-10. Review if JSON output fits the following description
-11. Output final JSON output if it is correct
-
-**Required JSON Format (strictly follow the format):
-**Do not include special characters in JSON output**
-**Do not include new lines in JSON output**
-{{
-  "ideas_considered_but_not_chosen": ["Idea 1", "Idea 2"], #Not to return "Idea 1" or "Idea 2"; it is just a placeholder. Return the banned ideas instead.
-  "idea_title": "New Title",
-  "idea_method": "Detailed Steps..."
-}}
-'''
-
-LLM_AGENT_2_PROMPT = '''
-Propose [ 1 ] break through method for the scientific question: {var_scientific_question}
-
-**Banned ideas (STRICTLY PROHIBITED):
+**Banned ideas (STRICTLY PROHIBITED:
 {var_discarded_ideas}
 
 **Requirements:
@@ -111,7 +87,7 @@ Propose [ 1 ] break through method for the scientific question: {var_scientific_
 }}
 '''
 
-LLM_AGENT_3_PROMPT = '''
+LLM_agent_2_PROMPT = '''
 Select the BEST idea for the scientific question: {var_scientific_question}
 
 **Evaluation Criteria:
@@ -138,20 +114,22 @@ Select the BEST idea for the scientific question: {var_scientific_question}
 }}
 '''
 
+LLM_agent_3_PROMPT = '''
+List all methods from the scientific litearture for the following scientific question.
+In your answer, please be precise and specific about details, instead of giving over-simplified overview descriptions.
+Scientific question to work on: 
+{var_litearture_review}
+'''
+
 ###############################################################################
 # Pydantic Models for Response Validation
 ###############################################################################
-class Agent1Response(BaseModel):
+class agent1Response(BaseModel):
     ideas_considered_but_not_chosen: List[str] = Field(alias="ideas_considered_but_not_chosen")
     idea_title: str = Field(alias="idea_title")
     idea_method: str = Field(alias="idea_method")
 
-class Agent2Response(BaseModel):
-    ideas_considered_but_not_chosen: List[str] = Field(alias="ideas_considered_but_not_chosen")
-    idea_title: str = Field(alias="idea_title")
-    idea_method: str = Field(alias="idea_method")
-
-class Agent3Response(BaseModel):
+class agent2Response(BaseModel):
     keep: str = Field(alias="keep")
     reject: str = Field(alias="reject")
 
@@ -185,6 +163,7 @@ def execute_agent(
     for attempt in range(1, retries + 1):
         try:
             print(f"Attempt {attempt}/{retries} - Model: {model}")
+            print(prompt)
             response = litellm.completion(
                 model=model,
                 messages=[{"content": prompt, "role": "user"}],
@@ -192,7 +171,6 @@ def execute_agent(
             content = response.choices[0].message.content
 
             if model == "deepseek/deepseek-reasoner" and var_show_reasoning:
-                print("\nReasoning:")
                 print(response.choices[0].message.reasoning_content)
 
             json_str = robust_json_extractor(content)
@@ -213,34 +191,23 @@ def execute_agent(
 ###############################################################################
 # Agents
 ###############################################################################
-def agent1_initial(question: str):
-    prompt = LLM_AGENT_1_PROMPT.format(var_scientific_question=question, CRITERIA=CRITERIA)
-    response = execute_agent(prompt, var_llm_agent1, Agent1Response, retries=var_retries)
-    if response is not None:
-        return (
-            response.ideas_considered_but_not_chosen,
-            response.idea_title,
-            response.idea_method
-        )
-    return [], None, None
-
-def Agent2_continuation(question: str, banned: list):
-    prompt = LLM_AGENT_2_PROMPT.format(
+def aagent1_brainstorm(question: str, banned: list):
+    prompt = LLM_agent_1_PROMPT.format(
         var_scientific_question=question,
         var_discarded_ideas=json.dumps(banned, indent=2),
         CRITERIA=CRITERIA
     )
 
-    response = execute_agent(prompt, var_llm_Agent2, Agent2Response, retries=var_retries)
+    response = execute_agent(prompt, var_llm_agent1, agent1Response, retries=var_retries)
     if response is not None:
         return response.ideas_considered_but_not_chosen, response.idea_title, response.idea_method
     return [], None, None
 
-def Agent3_evaluator(question: str, idea_a: tuple, idea_b: tuple):
+def agent2_evaluator(question: str, idea_a: tuple, idea_b: tuple):
     title_a, method_a = idea_a
     title_b, method_b = idea_b
 
-    prompt = LLM_AGENT_3_PROMPT.format(
+    prompt = LLM_agent_2_PROMPT.format(
         var_scientific_question=question,
         var_title_1=title_a,
         var_method_1=method_a,
@@ -249,10 +216,24 @@ def Agent3_evaluator(question: str, idea_a: tuple, idea_b: tuple):
         CRITERIA=CRITERIA
     )
 
-    response = execute_agent(prompt, var_llm_Agent3, Agent3Response, retries=var_retries)
+    response = execute_agent(prompt, var_llm_agent2, agent2Response, retries=var_retries)
     if response is not None:
         return response.keep, response.reject
     return None, None
+
+def agent3_literature_review(question: str):
+    prompt = LLM_agent_3_PROMPT.format(
+        var_litearture_review=question,
+    )
+    response = completion(
+        model=var_llm_agent3,
+        messages=[{"content": prompt, "role": "user"}],
+        stream=False
+    )
+    output_with_reasoning = response.choices[0].message.content
+    output_without_reasoning = re.sub(r'<think>.*?</think>', '', output_with_reasoning, flags=re.DOTALL)
+    output_without_reasoning = re.sub(r'<think>|</think>', '', output_without_reasoning)
+    return output_without_reasoning
 
 ###############################################################################
 # Main Workflow
@@ -267,32 +248,29 @@ def research_workflow(
     banned_ideas = []
     
     print("\n" + "═"*50 + "\n🔬 SQUEEASY WORKFLOW INITIATED\n" + "═"*50)
-    print(f"Research Question: {question}")
+    print(f"\nLiterature Review: {var_litearture_review}")
+    print(f"\nResearch Question: {question}")
     print(f"\nTotal ideas to Generate: {cycles}")
     print(f"Max Pairs to Evaluate: {max_pairs}")
     print(f"Pairwise Matches per Pair: {matches}")
 
-    # --- PHASE 1: idea GENERATION ---
+    # --- PHASE 0: LITERATURE REVIEW ---
+    print("\n" + "═"*50 + "\n🚀 PHASE 0: LITERATURE REVIEW\n" + "═"*50)
+    if var_literature_review:   
+        var_literature_summary = agent3_literature_review(var_litearture_review)
+        print(var_literature_summary)
+        banned_ideas += [var_literature_summary]
+    else:
+        print("Literature review is not performed.")
+
+    # --- PHASE 1: IDEAS GENERATION ---
     print("\n" + "═"*50 + "\n🚀 PHASE 1: IDEAS GENERATION\n" + "═"*50)
 
-    print(f"## Cycle 1: Generating idea ##")
-    initial_banned, c_title, c_method = agent1_initial(question)
-    if c_title is None:
-        print("Agent1 failed to produce valid initial idea after all retries.")
-        return pd.DataFrame()
-
-    all_ideas.append({'title': c_title, 'method': c_method})
-    # banned_ideas = [c_title] + initial_banned
-    banned_ideas = [c_title] 
-    print(f"\nCycle 1: Idea: {c_title}")
-    print(f"\nCycle 1: Method: {c_method}")
-    print(f"\nCycle 1: Combined list of ideas: {banned_ideas}")
-
-    for cycle in range(2, cycles+1):
+    for cycle in range(1, cycles+1):
         print(f"\n## Cycle {cycle}: Generating idea ##")
-        new_banned, new_title, new_method = Agent2_continuation(question, banned_ideas)
+        new_banned, new_title, new_method = aagent1_brainstorm(question, banned_ideas)
         if new_title is None:
-            print(f"Agent2 failed on cycle {cycle}, skipping new idea this round.")
+            print(f"agent1 failed on cycle {cycle}, skipping new idea this round.")
             continue
 
         all_ideas.append({'title': new_title, 'method': new_method})
@@ -300,7 +278,7 @@ def research_workflow(
         banned_ideas += [new_title]
         print(f"\nCycle {cycle}: Idea - {new_title}")
         print(f"\nCycle {cycle}: Method: {new_method}")
-        print(f"\nCycle {cycle}: Combined list of ideas: {banned_ideas}")
+        print(f"\nCycle {cycle}: Ideas not selected in this prompt: {banned_ideas}")
 
     # --- PHASE 2: SUBSAMPLED PAIRWISE EVALUATION ---
     print("\n" + "═"*50 + "\n🔍 PHASE 2: SUBSAMPLED PAIRWISE EVALUATION\n" + "═"*50)
@@ -322,14 +300,14 @@ def research_workflow(
     for match_num in range(1, matches + 1):
         print(f"\nMatch Round {match_num}/{matches}")
         for idx, (a, b) in enumerate(idea_pairs):
-            kept_title, rejected_title = Agent3_evaluator(
+            kept_title, rejected_title = agent2_evaluator(
                 question=question,
                 idea_a=(a['title'], a['method']),
                 idea_b=(b['title'], b['method'])
             )
 
             if kept_title is None:
-                print(f"⚠️ Agent3 failed for pair {idx+1}, skipping this match.")
+                print(f"⚠️ agent2 failed for pair {idx+1}, skipping this match.")
                 continue
 
             if kept_title == a['title']:
@@ -379,5 +357,80 @@ if __name__ == "__main__":
         print("\n" + "═"*50 + "\n🏆 FINAL LEADERBOARD\n" + "═"*50)
         print(results[['Rank', 'Title', 'Elo_Rating', 'Method_Summary']].to_markdown(index=False))
         print(f"\nResults saved to: {output_path}")
+        
+        # --- TASK 1: Generate HTML Visualization with Settings ---
+        output_path_html = output_path.replace('.csv', '.html')
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Squeeasy Final Leaderboard</title>
+<style>
+    body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f9f9f9; }}
+    h1, h2 {{ color: #333; }}
+    table {{ border-collapse: collapse; width: 100%; margin-bottom: 40px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+    th {{ background-color: #f2f2f2; }}
+    .idea-section {{ margin-top: 40px; }}
+    .idea {{ margin-bottom: 20px; padding: 10px; background-color: #fff; border: 1px solid #ddd; border-radius: 5px; }}
+    .idea-title {{ font-weight: bold; font-size: 1.2em; margin-bottom: 5px; }}
+    .idea-method {{ margin-left: 20px; white-space: pre-wrap; }}
+    .settings-table {{ margin-bottom: 40px; }}
+</style>
+</head>
+<body>
+<h1>Squeeasy Final Leaderboard</h1>
+<h2>Elo Table</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Rank</th>
+      <th>Title</th>
+      <th>Elo Rating</th>
+    </tr>
+  </thead>
+  <tbody>
+"""
+        # Add table rows for the Elo table
+        for index, row in results.iterrows():
+            html_content += f"<tr><td>{row['Rank']}</td><td>{row['Title']}</td><td>{row['Elo_Rating']}</td></tr>"
+        html_content += """
+  </tbody>
+</table>
+<h2>Settings</h2>
+<table class="settings-table">
+  <thead>
+    <tr>
+      <th>Parameter</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Research Question</td><td>""" + var_scientific_question.replace("\n", "<br>") + """</td></tr>
+    <tr><td>Literature Review</td><td>""" + var_litearture_review.replace("\n", "<br>") + """</td></tr>
+    <tr><td>LLM Agent 1</td><td>""" + var_llm_agent1 + """</td></tr>
+    <tr><td>LLM Agent 2</td><td>""" + var_llm_agent2 + """</td></tr>
+    <tr><td>LLM Agent 3</td><td>""" + var_llm_agent3 + """</td></tr>
+    <tr><td>Cycles</td><td>""" + str(var_cycles) + """</td></tr>
+    <tr><td>Retries</td><td>""" + str(var_retries) + """</td></tr>
+    <tr><td>Matches</td><td>""" + str(var_matches) + """</td></tr>
+    <tr><td>Max Pairs</td><td>""" + str(var_max_pairs) + """</td></tr>
+    <tr><td>Show Reasoning</td><td>""" + str(var_show_reasoning) + """</td></tr>
+  </tbody>
+</table>
+<div class="idea-section">
+<h2>Idea Details</h2>
+"""
+        # Add detailed sections for each idea (Title and full Method)
+        for index, row in results.iterrows():
+            html_content += f"<div class='idea'><div class='idea-title'>Rank {row['Rank']}: {row['Title']}</div><div class='idea-method'>{row['Method']}</div></div>"
+        html_content += """
+</div>
+</body>
+</html>
+"""
+        with open(output_path_html, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print(f"HTML visualization saved to: {output_path_html}")
     else:
         print("❌ Workflow failed to generate meaningful results")
