@@ -1,7 +1,7 @@
 <h1>Squeeasy - Squeezing Scientific Creativity Out of Large Language Models Made Easy</h1>
 
 <ul>
-    <li><strong>Version:</strong> v0.3</li>
+    <li><strong>Version:</strong> v0.4</li>
     <li><strong>Date:</strong> February 3, 2025</li>
     <li><strong>Developers:</strong> Chun-Ka Wong, Wing-Chun San</li>
     <li><strong>Contact:</strong> wongeck@hku.hk</li>

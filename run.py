@@ -1,4 +1,4 @@
-# Squeeasy v0.1.3
+# Squeeasy v0.4
 # Developed by Chun-Ka Wong and Wing-Chun San
 # wongeck@hku.hk
 # Last updated: 03/02/2025
@@ -15,6 +15,8 @@ from time import sleep
 from itertools import combinations
 import random
 from openai import OpenAI
+import concurrent.futures
+import threading
 # litellm._turn_on_debug()
 
 ###############################################################################
@@ -30,16 +32,16 @@ var_litearture_review = ""
 
 var_scientific_question = ""
 
-var_llm_agent1 = "o3-mini" # For idea GENERATION
-var_llm_agent2 = "o3-mini" # For idea EVALUATION
-var_llm_agent3 = "perplexity/sonar-reasoning" # For literature review
+var_llm_agent1 = "o3-mini"
+var_llm_agent2 = "o3-mini"
+var_llm_agent3 = "perplexity/sonar-reasoning"  # options: perplexity/sonar-reasoning, perplexity/sonar-pro, perplexity/sonar
 
 var_cycles = 5
 var_retries = 3
 var_matches = 1
-var_max_pairs = 5
-var_show_reasoning = True # Only applicable if deepseek/deepseek-reasoner is used
-var_literature_review = False # Only applicable if perplexity/sonar-reasoning is available
+var_max_pairs = 10
+var_show_reasoning = True  # Only applicable if deepseek/deepseek-reasoner is used
+var_literature_review = True  # Set to True if perplexity API is available for literature review
 
 CRITERIA = '''
 1. Must be a new approach with no prior publications or report at all.
@@ -81,7 +83,7 @@ Propose [ 1 ] break through method for the scientific question: {var_scientific_
 **Do not include special characters in JSON output**
 **Do not include new lines in JSON output**
 {{
-  "ideas_considered_but_not_chosen": ["Idea 1", "Idea 2"], #Not to return "Idea 1" or "Idea 2"; it is just a placeholder. Return the banned ideas instead.
+  "ideas_considered_but_not_chosen": ["Idea 1", "Idea 2"],
   "idea_title": "New Title",
   "idea_method": "Detailed Steps..."
 }}
@@ -246,9 +248,9 @@ def research_workflow(
 ):
     all_ideas = []
     banned_ideas = []
-    
+    literature_review_result = None  # To store literature review output
     print("\n" + "═"*50 + "\n🔬 SQUEEASY WORKFLOW INITIATED\n" + "═"*50)
-    print(f"\nLiterature Review: {var_litearture_review}")
+    print(f"\nLiterature Review Query: {var_litearture_review}")
     print(f"\nResearch Question: {question}")
     print(f"\nTotal ideas to Generate: {cycles}")
     print(f"Max Pairs to Evaluate: {max_pairs}")
@@ -256,16 +258,19 @@ def research_workflow(
 
     # --- PHASE 0: LITERATURE REVIEW ---
     print("\n" + "═"*50 + "\n🚀 PHASE 0: LITERATURE REVIEW\n" + "═"*50)
-    if var_literature_review:   
-        var_literature_summary = agent3_literature_review(var_litearture_review)
-        print(var_literature_summary)
-        banned_ideas += [var_literature_summary]
+    if var_literature_review:
+        # Run the literature review LLM call in a separate thread
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_lit = executor.submit(agent3_literature_review, var_litearture_review)
+            literature_review_result = future_lit.result()
+        print(literature_review_result)
+        banned_ideas += [literature_review_result]
     else:
         print("Literature review is not performed.")
 
     # --- PHASE 1: IDEAS GENERATION ---
     print("\n" + "═"*50 + "\n🚀 PHASE 1: IDEAS GENERATION\n" + "═"*50)
-
+    agent1_cycle_outputs = []
     for cycle in range(1, cycles+1):
         print(f"\n## Cycle {cycle}: Generating idea ##")
         new_banned, new_title, new_method = aagent1_brainstorm(question, banned_ideas)
@@ -274,11 +279,17 @@ def research_workflow(
             continue
 
         all_ideas.append({'title': new_title, 'method': new_method})
-        # banned_ideas += [new_title] + new_banned
         banned_ideas += [new_title]
         print(f"\nCycle {cycle}: Idea - {new_title}")
         print(f"\nCycle {cycle}: Method: {new_method}")
         print(f"\nCycle {cycle}: Ideas not selected in this prompt: {banned_ideas}")
+        # Save the raw output from agent1 for this cycle.
+        agent1_cycle_outputs.append({
+            "Cycle": cycle,
+            "Banned_Ideas": new_banned,
+            "Idea_Title": new_title,
+            "Idea_Method": new_method
+        })
 
     # --- PHASE 2: SUBSAMPLED PAIRWISE EVALUATION ---
     print("\n" + "═"*50 + "\n🔍 PHASE 2: SUBSAMPLED PAIRWISE EVALUATION\n" + "═"*50)
@@ -297,34 +308,41 @@ def research_workflow(
 
     print(f"Evaluating {len(idea_pairs)} pairs (sampled from {len(all_possible_pairs)}) across {matches} matches")
 
-    for match_num in range(1, matches + 1):
-        print(f"\nMatch Round {match_num}/{matches}")
-        for idx, (a, b) in enumerate(idea_pairs):
-            kept_title, rejected_title = agent2_evaluator(
-                question=question,
-                idea_a=(a['title'], a['method']),
-                idea_b=(b['title'], b['method'])
-            )
+    # Create a lock to update Elo scores safely
+    elo_lock = threading.Lock()
 
-            if kept_title is None:
-                print(f"⚠️ agent2 failed for pair {idx+1}, skipping this match.")
-                continue
-
-            if kept_title == a['title']:
-                winner, loser = a, b
-            else:
-                winner, loser = b, a
-
-            new_winner_elo, new_loser_elo = update_elo(winner['elo'], loser['elo'], 1)
+    # Define a helper function to evaluate a single pair
+    def evaluate_pair(a, b, pair_idx):
+        kept_title, rejected_title = agent2_evaluator(
+            question=question,
+            idea_a=(a['title'], a['method']),
+            idea_b=(b['title'], b['method'])
+        )
+        if kept_title is None:
+            print(f"⚠️ agent2 failed for pair {pair_idx}, skipping this match.")
+            return
+        if kept_title == a['title']:
+            winner, loser = a, b
+        else:
+            winner, loser = b, a
+        new_winner_elo, new_loser_elo = update_elo(winner['elo'], loser['elo'], 1)
+        with elo_lock:
             winner['elo'] = new_winner_elo
             loser['elo'] = new_loser_elo
+        print(f"Pair {pair_idx}: {a['title'][:15]} vs {b['title'][:15]} => Winner: {kept_title[:15]} (New Elo: {winner['elo']:.1f}|{loser['elo']:.1f})")
 
-            print(f"Pair {idx+1}: {a['title'][:15]} vs {b['title'][:15]} => "
-                  f"Winner: {kept_title[:15]} (New Elo: {winner['elo']:.1f}|{loser['elo']:.1f})")
+    for match_num in range(1, matches + 1):
+        print(f"\nMatch Round {match_num}/{matches}")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for idx, (a, b) in enumerate(idea_pairs, start=1):
+                futures.append(executor.submit(evaluate_pair, a, b, idx))
+            # Wait for all pair evaluations to complete before proceeding to the next match round
+            concurrent.futures.wait(futures)
 
     if not elo_ideas:
         print("No valid ideas were generated.")
-        return pd.DataFrame()
+        return pd.DataFrame(), agent1_cycle_outputs, literature_review_result
 
     elo_ideas.sort(key=lambda x: x['elo'], reverse=True)
 
@@ -338,14 +356,14 @@ def research_workflow(
         }
         for i, c in enumerate(elo_ideas)
     ])
-    return results
+    return results, agent1_cycle_outputs, literature_review_result
 
 ###############################################################################
 # Main Execution
 ###############################################################################
 if __name__ == "__main__":
     print("\n" + "═"*50 + "\n🚀 Starting the Squeeasy Workflow\n" + "═"*50)
-    results = research_workflow(
+    results, agent1_cycle_outputs, literature_review_result = research_workflow(
         question=var_scientific_question,
         cycles=var_cycles,
         matches=var_matches,
@@ -353,10 +371,20 @@ if __name__ == "__main__":
     )
 
     if not results.empty:
+        # Save final leaderboard results.
         results.to_csv(output_path, index=False)
         print("\n" + "═"*50 + "\n🏆 FINAL LEADERBOARD\n" + "═"*50)
         print(results[['Rank', 'Title', 'Elo_Rating', 'Method_Summary']].to_markdown(index=False))
         print(f"\nResults saved to: {output_path}")
+        
+        # --- Separately save output from agent1 ---
+        if agent1_cycle_outputs:
+            df_agent1 = pd.DataFrame(agent1_cycle_outputs)
+            # Convert the list of banned ideas into a JSON string for CSV compatibility.
+            df_agent1['Banned_Ideas'] = df_agent1['Banned_Ideas'].apply(lambda x: json.dumps(x))
+            agent1_output_path = output_path.replace('.csv', '_agent1.csv') if output_path else "agent1_output.csv"
+            df_agent1.to_csv(agent1_output_path, index=False)
+            print(f"Agent1 outputs saved to: {agent1_output_path}")
         
         # --- TASK 1: Generate HTML Visualization with Settings ---
         output_path_html = output_path.replace('.csv', '.html')
@@ -376,10 +404,21 @@ if __name__ == "__main__":
     .idea-title {{ font-weight: bold; font-size: 1.2em; margin-bottom: 5px; }}
     .idea-method {{ margin-left: 20px; white-space: pre-wrap; }}
     .settings-table {{ margin-bottom: 40px; }}
+    .literature-review {{
+        margin-bottom: 40px;
+        padding: 10px;
+        background-color: #eef;
+        border: 1px solid #ccd;
+        border-radius: 5px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }}
 </style>
 </head>
 <body>
 <h1>Squeeasy Final Leaderboard</h1>
+<h2>Version 0.4 (03/02/2025)</h2>
 <h2>Elo Table</h2>
 <table>
   <thead>
@@ -407,10 +446,10 @@ if __name__ == "__main__":
   </thead>
   <tbody>
     <tr><td>Research Question</td><td>""" + var_scientific_question.replace("\n", "<br>") + """</td></tr>
-    <tr><td>Literature Review</td><td>""" + var_litearture_review.replace("\n", "<br>") + """</td></tr>
-    <tr><td>LLM Agent 1</td><td>""" + var_llm_agent1 + """</td></tr>
-    <tr><td>LLM Agent 2</td><td>""" + var_llm_agent2 + """</td></tr>
-    <tr><td>LLM Agent 3</td><td>""" + var_llm_agent3 + """</td></tr>
+    <tr><td>Literature Review Query</td><td>""" + var_litearture_review.replace("\n", "<br>") + """</td></tr>
+    <tr><td>LLM Agent 1 (Idea Generator)</td><td>""" + var_llm_agent1 + """</td></tr>
+    <tr><td>LLM Agent 2 (Evaluator)</td><td>""" + var_llm_agent2 + """</td></tr>
+    <tr><td>LLM Agent 3 (Literature Review)</td><td>""" + var_llm_agent3 + """</td></tr>
     <tr><td>Cycles</td><td>""" + str(var_cycles) + """</td></tr>
     <tr><td>Retries</td><td>""" + str(var_retries) + """</td></tr>
     <tr><td>Matches</td><td>""" + str(var_matches) + """</td></tr>
@@ -418,6 +457,10 @@ if __name__ == "__main__":
     <tr><td>Show Reasoning</td><td>""" + str(var_show_reasoning) + """</td></tr>
   </tbody>
 </table>
+<h2>Literature Review Results</h2>
+<div class="literature-review">
+    <pre>""" + (literature_review_result if literature_review_result is not None else "Literature review not performed.") + """</pre>
+</div>
 <div class="idea-section">
 <h2>Idea Details</h2>
 """
